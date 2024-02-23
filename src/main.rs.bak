@@ -1,0 +1,163 @@
+use bevy::{log::LogPlugin, prelude::*, window::{PrimaryWindow, WindowResized, WindowResolution}};
+use phases::spawn_dots;
+use rand::{rngs::StdRng, SeedableRng};
+use render::render_dots;
+
+mod phases;
+mod graph;
+mod render;
+
+const WIN_SIZE: (f32, f32) = (800.0, 600.0);
+
+fn main() {
+    App::new()
+        .add_plugins(DefaultPlugins.set(LogPlugin {
+            level: bevy::log::Level::DEBUG,
+            filter: "warn,profile_website=debug".into()
+        }).set(WindowPlugin {
+            primary_window: Some(Window {
+                resolution: WindowResolution::new(WIN_SIZE.0, WIN_SIZE.1),
+                resizable: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .insert_resource(MousePosition(Vec2::ZERO))
+        .insert_resource(Randomness(StdRng::seed_from_u64(69)))
+        .insert_resource(ViewableRect(None))
+        .add_systems(Startup, startup.before(spawn_dots))
+        .add_systems(Startup, spawn_dots)
+        .add_systems(Update, (update_mouse, render_dots, check_screen_resize))
+        .run();
+}
+
+fn startup(
+    mut commands: Commands,
+    mut viewable_rect: ResMut<ViewableRect>
+) {
+    // // Quad
+    // commands.spawn(MaterialMesh2dBundle {
+    //     mesh: meshes
+    //         .add(shape::Quad::new(Vec2::ONE).into())
+    //         .into(),
+    //     material: materials.add(ColorMaterial::from(Color::LIME_GREEN)),
+    //     transform: Transform::from_translation(Vec3::new(0., 0., 0.)).with_scale(Vec3::new(20., 20., 1.)),
+    //     ..default()
+    // })
+    //     .insert(Edge);
+    let cam_bundle = Camera2dBundle {
+        transform: Transform::IDENTITY
+            .with_translation(Vec3::new(WIN_SIZE.0 / 2., WIN_SIZE.1 / 2., 0.))
+            .with_scale(Vec3::new(1., -1., 1.)),
+        ..Default::default()
+    };
+    viewable_rect.0 = get_viewable_rect(&cam_bundle.camera, &cam_bundle.global_transform);
+    commands.spawn((cam_bundle, MainCamera));
+}
+
+/// Used to help identify our main camera
+#[derive(Component)]
+struct MainCamera;
+
+// /// Identifies an edge piece in the game
+// #[derive(Component)]
+// struct Edge;
+
+#[derive(Resource, Default)]
+struct MousePosition(Vec2);
+
+#[derive(Resource)]
+struct Randomness(StdRng);
+
+#[derive(Resource, Debug)]
+struct ViewableRect(Option<Rect>);
+
+// fn move_edges(
+//     mouse: Res<MousePosition>,
+//     mut query: Query<&mut Transform, With<Edge>>
+// ) {
+//     for mut tf in query.iter_mut() {
+//         *tf = tf.with_translation(Vec3::new(mouse.0.x, mouse.0.y, 0.));
+//     }
+// }
+
+fn update_mouse(
+    mut mouse: ResMut<MousePosition>,
+    window_q: Query<&Window, With<PrimaryWindow>>,
+    camera_q: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
+    mut gizmos: Gizmos
+) {
+    // get the camera info and transform
+    // assuming there is exactly one main camera entity, so query::single() is OK
+    let (camera, camera_transform) = camera_q.single();
+    let window = window_q.single();
+    // check if the cursor is inside the window and get its position
+    // then, ask bevy to convert into world coordinates, and truncate to discard Z
+    if let Some(world_position) = window
+        .cursor_position()
+        .and_then(|cursor| camera.viewport_to_world_2d(camera_transform, cursor))
+    {
+        mouse.0 = world_position;
+        gizmos.line_2d(Vec2::ZERO, mouse.0, Color::WHITE);
+        debug!("Mouse screen pos: {:?}", window.cursor_position());
+        debug!("Mouse position: {:?}", mouse.0);
+    }
+
+    // debug!("{:?}", get_viewable_rect(camera, camera_transform));
+}
+
+fn check_screen_resize(
+    camera_q: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
+    mut resized_event: EventReader<WindowResized>,
+    mut viewable_rect: ResMut<ViewableRect>
+) {
+    for _ in resized_event.read() {
+        let (camera, camera_transform) = camera_q.single();
+        viewable_rect.0 = get_viewable_rect(camera, camera_transform)
+    }
+}
+
+fn get_viewable_rect(camera: &Camera, camera_transform: &GlobalTransform) -> Option<Rect> {
+    camera.logical_viewport_rect().and_then(|rect| {
+        match (
+            camera.viewport_to_world_2d(camera_transform, rect.min),
+            camera.viewport_to_world_2d(camera_transform, rect.max)
+        )
+        {
+            (Some(min), Some(max)) => Some(Rect::from_corners(min, max)),
+            _ => None
+        }
+    })
+}
+
+/*
+// phase 1 (just dots)
+1. Dots spawn randomly on load
+2. Every dot computes their neighbors (stored in component data)
+    - Fastest: For every dot, check N random dots and make neighbor if distance less than D
+    - For every dot, iterate through every other dot and make neighbor if distance less than D
+    - Slowest: For every dot, sort every other dot by distance and pick N nearest (probably don't use this. keep in mind all the dots are roughly the same distance apart anyways)
+3. Dots repel each other
+4. Mouse repels dots
+
+// phase 2 (dots -> graph)
+1. Every dot gradually extends a line going from itself to its neighbors
+2. Dots fade out
+Undo:
+1. Dots fade in
+2. Dots gradually retract their lines
+
+
+// phase 3 (graph -> disconnected edges)
+1. dots no longer repeled by mouse (fixes a potential issue)
+2. graph -> segments algorithm:
+    - elimination algorithm (iterate all: pick first neighbor without a visible edge)
+    - Hard to undo: every dot replicates for every neighbor and becomes half of the edge
+3. Edges are given a random rotation with friction (a "shattering" effect)
+Undo:
+1. friction is max (so they stop spinning)
+2. recompute neighbors (spinning and phase 4 messes up their order)
+3. Every dot gradually extends the lines to their neighbors
+
+// phase 4 (disconnected edges point at mouse)
+*/
